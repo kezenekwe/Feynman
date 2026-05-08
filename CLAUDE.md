@@ -25,17 +25,177 @@ Target users: high school and university students.
 - **Prisma** — Supabase already provides a typed client. The ORM abstraction adds complexity without payoff here.
 - **Docker / Kubernetes** — Vercel removes the need entirely.
 
-## Architecture Notes
+## Architecture
+
+### Component Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        BROWSER                              │
+│                                                             │
+│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │  Auth Pages  │  │  Dashboard   │  │   Session Page   │  │
+│  │  (login /   │  │  (history +  │  │  (active chat)   │  │
+│  │   signup)   │  │   reviews)   │  │                  │  │
+│  └─────────────┘  └──────────────┘  └──────────────────┘  │
+│                                             │               │
+│                          ┌──────────────────┤               │
+│                          │                  │               │
+│                   ┌──────▼──────┐  ┌───────▼───────┐      │
+│                   │VoiceRecorder│  │  AudioPlayer  │      │
+│                   │(Web Speech  │  │ (ElevenLabs   │      │
+│                   │    API)     │  │  audio stream)│      │
+│                   └─────────────┘  └───────────────┘      │
+│                                                             │
+│  State: React local state + Supabase client (auth only)    │
+└───────────────────────────┬─────────────────────────────────┘
+                            │ HTTPS
+┌───────────────────────────▼─────────────────────────────────┐
+│                  NEXT.JS SERVER (Vercel)                     │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │                   Route Handlers                      │  │
+│  │                                                       │  │
+│  │  POST /api/sessions          — create session         │  │
+│  │  POST /api/sessions/[id]/end — end session            │  │
+│  │  POST /api/chat              — stream Claude reply    │  │
+│  │  POST /api/audio             — proxy ElevenLabs TTS  │  │
+│  │  GET  /api/sessions          — list user sessions     │  │
+│  │  GET  /api/sessions/[id]     — session + messages     │  │
+│  │  GET  /api/sessions/[id]/review — fetch review        │  │
+│  └───────┬────────────────┬─────────────────┬────────────┘  │
+│          │                │                 │               │
+│   Business logic lives here — never in the browser          │
+└──────────┼────────────────┼─────────────────┼───────────────┘
+           │                │                 │
+     ┌─────▼──────┐  ┌──────▼──────┐  ┌──────▼──────┐
+     │  Supabase  │  │ Claude API  │  │ ElevenLabs  │
+     │  Postgres  │  │ (Anthropic) │  │    API      │
+     │  + Auth    │  │             │  │             │
+     └────────────┘  └─────────────┘  └─────────────┘
+```
+
+### Data Flow
+
+**1. Auth**
+```
+Browser → Supabase Auth (email/password)
+       ← JWT stored in httpOnly cookie
+```
+
+**2. Start a session**
+```
+Browser  →  POST /api/sessions { topic }
+Server   →  check users.sessions_this_month < plan limit
+         →  INSERT into sessions
+         →  increment sessions_this_month
+Browser  ←  { session_id }
+```
+
+**3. Chat turn**
+```
+Browser  →  POST /api/chat { session_id, message }
+Server   →  INSERT message (role: user) into messages
+         →  fetch full message history for session
+         →  call Claude API (stream) → stream chunks to browser
+         →  INSERT complete response (role: assistant) into messages
+
+Browser  →  POST /api/audio { text } (parallel, once text starts)
+Server   →  call ElevenLabs API (stream)
+Browser  ←  audio stream (plays as it arrives)
+```
+
+**4. End session + review**
+```
+Browser  →  POST /api/sessions/[id]/end
+Server   →  UPDATE sessions SET ended_at = now()
+         →  fetch all messages for session
+         →  call Claude API (not streamed) with analytical reviewer prompt
+         →  INSERT result into reviews
+Browser  ←  { review_id }
+```
+
+**5. View review**
+```
+Browser  →  GET /api/sessions/[id]/review
+Server   →  fetch review (RLS verifies ownership)
+Browser  ←  review JSON → rendered as report
+```
+
+### API Boundaries
+
+**Server-side only — never expose to browser:**
+- `ANTHROPIC_API_KEY` — all Claude calls go through Route Handlers
+- `ELEVENLABS_API_KEY` — all TTS calls proxied through Route Handlers
+- `SUPABASE_SERVICE_ROLE_KEY` — all writes use service role
+- Session limit enforcement — checked before any session is created
+- Prompt construction — persona and reviewer prompts live in server code
+
+**Client-side (Supabase anon key + RLS):**
+- Auth state and session token management
+- Read-only queries for own data, protected by Row Level Security
+- No writes — all mutations go through Route Handlers
+
+**The rule:** if it touches an API key or enforces a business rule, it runs on the server.
+
+### Where State Lives
+
+| State | Lives In |
+|-------|----------|
+| Auth / user identity | Supabase client (httpOnly cookie) |
+| Active chat messages | React local state (loaded from DB on mount, accumulated during session) |
+| Is-recording / is-playing | React local state (component level) |
+| Session history | Server-fetched on dashboard mount |
+| Review report | Server-fetched on review page mount |
+| Usage counter | Supabase DB (`sessions_this_month`) — source of truth is always the DB |
+
+No global state manager. React Context for auth propagation only. Add Zustand only if prop drilling becomes painful.
+
+### Business Logic Placement
+
+```
+Route Handlers (server)          React components (client)
+─────────────────────────        ─────────────────────────
+Session limit enforcement        Form validation (UX only)
+Prompt construction              Voice recording state
+Message persistence              Audio playback state
+Review generation trigger        Loading / error states
+Usage counter increments         Navigation
+Auth token verification          Rendering
+```
 
 ### Two-Prompt Design
-Claude is used in two distinct modes — do not collapse these into one system prompt:
 
-1. **Chat prompt** — Claude plays a curious, enthusiastic 12-year-old. Asks follow-up questions that probe gaps without being annoying. Never breaks character during the session.
-2. **Review prompt** — A separate analytical call over the full session transcript at session end. Identifies: concepts explained clearly, jargon used without simplification, questions the user couldn't answer, and suggested areas to revisit.
+Do not collapse these into one system prompt — they are separate Claude calls with different roles:
+
+**Call 1 — Chat (streaming, called per user message)**
+```
+System:   "You are a curious, enthusiastic 12-year-old named Felix..."
+Messages: full conversation history
+Stream:   yes
+```
+
+**Call 2 — Review (not streamed, called once at session end)**
+```
+System:   "You are an expert learning coach. Analyse this teaching transcript..."
+Messages: full session transcript
+Stream:   no — wait for complete structured JSON response
+Output:   { gaps: [], jargon: [], unclear: [], suggestions: [] }
+```
+
+Define the review JSON schema upfront so the review page renders predictably.
 
 ### Voice
+
 - **User input (STT):** Web Speech API (browser-native, no cost)
-- **Claude output (TTS):** ElevenLabs API — choose a young, curious-sounding voice. Stream audio responses where possible to reduce perceived latency.
+- **Claude output (TTS):** ElevenLabs API — stream audio, start playback as bytes arrive, kick off the request as soon as the first Claude text chunk lands to minimise latency
+
+### Scaling Notes (MVP)
+
+Vercel handles horizontal scaling; Supabase handles connection pooling and auth at scale. Two real risks to watch:
+
+1. **API costs** — session limit (3/month free) is the primary control. Add a soft per-session message cap (e.g. 50 messages) at pro tier to prevent runaway costs.
+2. **ElevenLabs latency** — TTS generation adds ~500ms–1s. Mitigate with streaming playback and early request dispatch.
 
 ### Data Model (Supabase / Postgres)
 ```
