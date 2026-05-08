@@ -8,13 +8,22 @@ Target users: high school and university students.
 
 ## Tech Stack
 
-| Layer | Choice |
-|-------|--------|
-| Frontend | React (web, responsive) |
-| Auth + Database | Supabase (email/password auth, Postgres) |
-| LLM | Claude API (Anthropic) |
-| Voice | ElevenLabs API (realistic TTS for Claude's 12-year-old voice) + Web Speech API (user mic input / STT) |
-| Hosting | Vercel |
+| Layer | Choice | Why |
+|-------|--------|-----|
+| Frontend + Backend | Next.js (App Router) | API Route Handlers keep Claude and ElevenLabs keys server-side. One repo, one deployment, native streaming support. Vercel has first-class Next.js support. |
+| Auth + Database | Supabase (Postgres + Auth) | Postgres is right for this relational data shape. Auth, DB, dashboard, and RLS in one product. Manual plan upgrades work directly in the table editor. |
+| LLM | Claude API (Anthropic) | Called server-side via Next.js Route Handlers only — key never exposed to the browser. |
+| Voice | ElevenLabs API (TTS) + Web Speech API (STT) | ElevenLabs for Claude's realistic 12-year-old voice output; Web Speech API for user mic input (browser-native, no cost). Both streamed where possible. |
+| Hosting | Vercel | Zero-config deploys from GitHub, first-class Next.js support, streaming responses work out of the box. |
+| Language | TypeScript throughout | Single language across the stack. |
+
+### What not to use (and why)
+- **Separate Express/Fastify backend** — Next.js Route Handlers replace this. Two deployments for no benefit.
+- **Firebase/Firestore** — NoSQL is wrong for this data shape. Querying ordered messages per session is trivial in Postgres, painful in Firestore.
+- **GraphQL / tRPC** — 4 tables and ~6 endpoints. REST route handlers are the right fit.
+- **Redux** — Use React Context or Zustand if needed. Redux is overkill.
+- **Prisma** — Supabase already provides a typed client. The ORM abstraction adds complexity without payoff here.
+- **Docker / Kubernetes** — Vercel removes the need entirely.
 
 ## Architecture Notes
 
