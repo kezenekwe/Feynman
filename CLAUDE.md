@@ -285,7 +285,7 @@ Sequential task list. Do not skip ahead — each task produces a testable artifa
 ## Key Commands
 
 ```bash
-npm run dev      # start dev server at localhost:3000
+npm run dev      # start dev server at localhost:3002
 npm run build    # production build (run before every deploy)
 npm run lint     # eslint check
 ```
