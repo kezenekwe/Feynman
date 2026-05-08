@@ -30,11 +30,13 @@ Claude is used in two distinct modes — do not collapse these into one system p
 
 ### Data Model (Supabase / Postgres)
 ```
-users          — id, email, created_at
+users          — id, email, plan ('free'|'pro'), sessions_this_month, created_at
 sessions       — id, user_id, topic, started_at, ended_at
 messages       — id, session_id, role (user|assistant), content, created_at
 reviews        — id, session_id, report_json, created_at
 ```
+
+The `plan` and `sessions_this_month` fields are set manually via Supabase for MVP — no Stripe integration yet. Design supports tiered billing without requiring it at launch.
 
 ## MVP Scope
 
@@ -45,8 +47,13 @@ reviews        — id, session_id, report_json, created_at
 - End session → trigger review generation
 - Review report: gaps, jargon, unanswered questions, suggestions
 - Session history with past reviews
+- Usage limits enforced server-side (3 sessions/month on free tier)
+- `plan` field in DB, manually upgradeable to 'pro' via Supabase dashboard
 
 ### Explicitly out of scope (do not add)
+- Stripe integration or any automated billing
+- Pricing / upgrade page (post-MVP)
+- Billing portal or invoice emails
 - Spaced repetition or study scheduling
 - Topic suggestions or curriculum maps
 - Scoring, grades, or gamification
@@ -54,6 +61,25 @@ reviews        — id, session_id, report_json, created_at
 - Native mobile app
 - OAuth / SSO (add post-MVP)
 - External resource recommendations
+
+## Monetization
+
+### MVP approach — manual tier management
+- All users start on `free` plan: **3 sessions/month** hard cap
+- Cap is enforced server-side before a session starts (check `sessions_this_month` against plan limit)
+- To upgrade a user to `pro`: flip `plan = 'pro'` directly in Supabase — no code change needed
+- Reset `sessions_this_month` to 0 at the start of each calendar month (cron job or Supabase scheduled function)
+
+### Tier limits
+| Plan | Sessions/month | Notes |
+|------|---------------|-------|
+| free | 3 | Default for all new users |
+| pro | Unlimited | Manual upgrade for MVP; Stripe in v1.1 |
+
+### Post-MVP — add Stripe in v1.1
+Build Stripe integration only after users start hitting the free limit and requesting more. That usage signal validates pricing before you invest in billing infrastructure.
+
+Do not add a pricing page, upgrade flow, or Stripe webhooks until v1.1.
 
 ## Key Commands
 
